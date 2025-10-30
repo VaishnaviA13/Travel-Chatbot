@@ -1,0 +1,9 @@
+id,itinerary_id,role,content
+1,1,user,Suggest some local market areas to go to
+2,1,assistant,"Sure, here are some local market areas you can explore in Pune:
+
+- Taylor's Market: Known for its variety of clothes, shoes, and accessories.
+- Fashion Street: A popular spot for shopping clothes, shoes, and accessories at affordable prices.
+- Laxmi Road: Famous for its jewelry, sarees, and household items.
+- Mahatma Phule Mandai: A large market for fresh fruits, vegetables, and flowers.
+- Hong Kong Lane: Known for its electronic goods, mobile phones, and accessories."
