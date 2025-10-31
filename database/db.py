@@ -2,6 +2,7 @@ import sqlite3
 import os
 import hashlib
 import csv
+import threading
 import requests
 import json
 import io
@@ -45,7 +46,7 @@ def init_gist():
 
     # create a new private gist with initial CSV headers
     initial_files = {
-        USERS_CSV: {'content': 'id,username,password_hash\n'},
+        USERS_CSV: {'content': 'id,username,password_hash,is_admin\n'},
         ITINERARIES_CSV: {'content': 'id,user_id,name,content,destination,duration,budget,preferences,user_name,is_public,num_people\n'},
         CHAT_CSV: {'content': 'id,itinerary_id,role,content\n'}
     }
@@ -120,13 +121,34 @@ def _append_row_to_gist_csv(gist_id, filename, data, headers):
     new_content = existing + row_text
     return _patch_gist_file(gist_id, filename, new_content)
 
+
+def fetch_gist_file(filename):
+    """Public wrapper: return gist file content or None."""
+    gist_id = _get_stored_gist_id()
+    if not gist_id:
+        gist_id = init_gist()
+        if not gist_id:
+            return None
+    return _read_gist_file_content(gist_id, filename)
+
+
+def push_gist_file(filename, content):
+    """Public wrapper: overwrite the gist file with provided content. Returns True on success."""
+    gist_id = _get_stored_gist_id()
+    if not gist_id:
+        gist_id = init_gist()
+        if not gist_id:
+            return False
+    return _patch_gist_file(gist_id, filename, content)
+
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         username TEXT UNIQUE,
-        password_hash TEXT
+        password_hash TEXT,
+        is_admin BOOLEAN DEFAULT 0
     )''')
     c.execute('''CREATE TABLE IF NOT EXISTS itineraries (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -161,6 +183,10 @@ def init_db():
         c.execute('ALTER TABLE itineraries ADD COLUMN num_people INTEGER')
     except sqlite3.OperationalError:
         pass  # Column already exists
+    try:
+        c.execute('ALTER TABLE users ADD COLUMN is_admin BOOLEAN DEFAULT 0')
+    except sqlite3.OperationalError:
+        pass
     conn.commit()
     conn.close()
 
@@ -174,11 +200,18 @@ def save_to_csv(filename, data, headers):
         if not file_exists:
             writer.writeheader()
         writer.writerow(data)
-    # If GITHUB_TOKEN is configured, also append/update the gist file
+    # If GITHUB_TOKEN is configured, also append/update the gist file in background
     try:
-        gist_id = init_gist()
-        if gist_id:
-            _append_row_to_gist_csv(gist_id, filename, data, headers)
+        def _bg_append():
+            try:
+                gist_id = init_gist()
+                if gist_id:
+                    _append_row_to_gist_csv(gist_id, filename, data, headers)
+            except Exception:
+                pass
+
+        t = threading.Thread(target=_bg_append, daemon=True)
+        t.start()
     except Exception:
         # Fail silently and keep local CSV as the primary fallback
         pass
@@ -187,12 +220,14 @@ def create_user(username, password):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     try:
-        c.execute('INSERT INTO users (username, password_hash) VALUES (?, ?)',
-                  (username, hash_password(password)))
+        # Create a regular user by default (is_admin = 0). Admins are managed separately.
+        is_admin_flag = 0
+        c.execute('INSERT INTO users (username, password_hash, is_admin) VALUES (?, ?, ?)',
+                  (username, hash_password(password), is_admin_flag))
         conn.commit()
         user_id = c.lastrowid
-        # Save to CSV
-        save_to_csv(USERS_CSV, {'id': user_id, 'username': username, 'password_hash': hash_password(password)}, ['id', 'username', 'password_hash'])
+        # Save to CSV (include is_admin)
+        save_to_csv(USERS_CSV, {'id': user_id, 'username': username, 'password_hash': hash_password(password), 'is_admin': is_admin_flag}, ['id', 'username', 'password_hash', 'is_admin'])
     except sqlite3.IntegrityError:
         user_id = None
     conn.close()
@@ -206,6 +241,35 @@ def authenticate_user(username, password):
     user = c.fetchone()
     conn.close()
     return user[0] if user else None
+
+
+def get_user(user_id):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('SELECT id, username, is_admin FROM users WHERE id = ?', (user_id,))
+    row = c.fetchone()
+    conn.close()
+    if not row:
+        return {}
+    return {'id': row[0], 'username': row[1], 'is_admin': bool(row[2])}
+
+
+def set_user_admin(user_id, is_admin=True):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('UPDATE users SET is_admin = ? WHERE id = ?', (1 if is_admin else 0, user_id))
+    conn.commit()
+    conn.close()
+    return True
+
+
+def list_users():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('SELECT id, username, is_admin FROM users ORDER BY id')
+    rows = c.fetchall()
+    conn.close()
+    return [{'id': r[0], 'username': r[1], 'is_admin': bool(r[2])} for r in rows]
 
 def save_itinerary(itinerary, user_id):
     conn = sqlite3.connect(DB_PATH)

@@ -4,13 +4,14 @@ from dotenv import load_dotenv
 import streamlit as st
 from models.itinerary import Itinerary
 from utils.parsing import display_itinerary
-from database.db import init_db, create_user, authenticate_user, save_itinerary, get_itineraries, get_public_itineraries, save_chat_message, get_chat_history
+from database.db import init_db, create_user, authenticate_user, save_itinerary, get_itineraries, get_public_itineraries, save_chat_message, get_chat_history, get_user, set_user_admin, list_users
 import hashlib
 import requests
 import requests
 import streamlit.components.v1 as components
 import uuid
 import html
+import os
 
 
 def safe_rerun():
@@ -40,6 +41,11 @@ st.set_page_config(page_title="AI Travel Itinerary Planner", page_icon="🌍", l
 
 load_dotenv()
 init_db()
+
+# Hardcoded admin credentials (change here if you want to set a different admin)
+# You can also override via environment variables ADMIN_USERNAME and ADMIN_PASSWORD if preferred.
+ADMIN_USERNAME = os.getenv('ADMIN_USERNAME', 'admin')
+ADMIN_PASSWORD = os.getenv('ADMIN_PASSWORD', 'admin123')
 
 def get_city_image(destination):
     try:
@@ -210,16 +216,17 @@ def render_carousel(img_urls, captions=None, uid=None, height=320):
         """
         return html_content
 
-llm=HuggingFaceEndpoint(
-    repo_id="mistralai/Mistral-7B-Instruct-v0.3",
-    task="text-generation"
-)
+@st.cache_resource
+def _load_model():
+    # Heavy model initialization cached across reruns
+    llm = HuggingFaceEndpoint(repo_id="mistralai/Mistral-7B-Instruct-v0.3", task="text-generation")
+    return ChatHuggingFace(llm=llm)
 
-model=ChatHuggingFace(llm=llm)
 
-template= PromptTemplate(
-    input_variables=["destination", "duration_days", "budget", "preferences", "user_questions", "user_name", "num_people"],
-    template='''You are a highly intelligent, friendly and detail-oriented Travel Planner AI. Your job is to create a tailor-made travel itinerary based on the user’s inputs, and to answer follow-up questions about that itinerary.
+def _get_template():
+    return PromptTemplate(
+        input_variables=["destination", "duration_days", "budget", "preferences", "user_questions", "user_name", "num_people"],
+        template='''You are a highly intelligent, friendly and detail-oriented Travel Planner AI. Your job is to create a tailor-made travel itinerary based on the user’s inputs, and to answer follow-up questions about that itinerary.
 
 User Inputs:
 - Name: {user_name}
@@ -284,14 +291,37 @@ if 'user_id' not in st.session_state:
         username = st.text_input("Username", key="login_username")
         password = st.text_input("Password", type="password", key="login_password")
         if st.button("Login"):
-            user_id = authenticate_user(username, password)
-            if user_id:
+            # If credentials match the hardcoded admin, ensure admin login.
+            if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
+                # Try normal authentication first; if user doesn't exist, create it and mark admin
+                user_id = authenticate_user(username, password)
+                if not user_id:
+                    # create regular user entry then set admin flag
+                    user_id = create_user(username, password)
+                    try:
+                        set_user_admin(user_id, True)
+                    except Exception:
+                        pass
                 st.session_state['user_id'] = user_id
                 st.session_state['username'] = username
-                st.success("Logged in successfully!")
+                st.session_state['is_admin'] = True
+                st.success("Logged in as admin")
                 st.rerun()
             else:
-                st.error("Invalid username or password.")
+                user_id = authenticate_user(username, password)
+                if user_id:
+                    st.session_state['user_id'] = user_id
+                    st.session_state['username'] = username
+                    # load admin flag for this user from DB
+                    try:
+                        u = get_user(user_id)
+                        st.session_state['is_admin'] = bool(u.get('is_admin', False))
+                    except Exception:
+                        st.session_state['is_admin'] = False
+                    st.success("Logged in successfully!")
+                    st.rerun()
+                else:
+                    st.error("Invalid username or password.")
     with tab2:
         new_username = st.text_input("New Username", key="reg_username")
         new_password = st.text_input("New Password", type="password", key="reg_password")
@@ -373,7 +403,14 @@ else:
     user_id = st.session_state['user_id']
 
     # Top-level tabs for main pages (replaces the old sidebar page selector)
-    tab_gen, tab_dash = st.tabs(["Generate Itinerary", "Dashboard"]) 
+    tabs = ["Generate Itinerary", "Dashboard"]
+    if st.session_state.get('is_admin'):
+        tabs.append('Storage')
+    # st.tabs returns one element per tab label; unpack accordingly
+    tab_objs = st.tabs(tabs)
+    tab_gen = tab_objs[0]
+    tab_dash = tab_objs[1]
+    tab_storage = tab_objs[2] if len(tab_objs) > 2 else None
 
     with tab_gen:
         st.title("🌍 Generate Your Travel Itinerary")
@@ -395,6 +432,8 @@ else:
                     st.error("Please fill in Destination and Your Name.")
                 else:
                     with st.spinner("Generating your itinerary..."):
+                        model = _load_model()
+                        template = _get_template()
                         chain = template | model
                         result = chain.invoke({
                             'destination': destination,
@@ -447,15 +486,28 @@ else:
     with tab_dash:
         st.title("📊 Your Dashboard")
         st.image("https://picsum.photos/800/150", use_container_width=True)
-        tab1, tab2 = st.tabs(["My Itineraries", "Public Itineraries"])
+        tab1, tab2, tab3 = st.tabs(["My Itineraries", "Public Itineraries", "Storage"]) 
 
         with tab1:
-            itineraries = get_itineraries(user_id)
+            # Use a session-cached copy of the user's itineraries to avoid re-querying heavy resources
+            if 'my_itins_local' in st.session_state and st.session_state.get('my_itins_local_user') == user_id:
+                itineraries = st.session_state['my_itins_local']
+            else:
+                itineraries = get_itineraries(user_id)
+                st.session_state['my_itins_local'] = itineraries
+                st.session_state['my_itins_local_user'] = user_id
             if not itineraries:
                 st.info("No itineraries saved yet. Generate one first!")
             else:
                 itinerary_names = [it.name for it in itineraries]
-                selected_name = st.selectbox("Select an Itinerary", itinerary_names, key="my_it")
+                # If we have a recently saved name, try to pre-select it
+                default_index = 0
+                if 'my_selected_name' in st.session_state:
+                    try:
+                        default_index = itinerary_names.index(st.session_state['my_selected_name'])
+                    except Exception:
+                        default_index = 0
+                selected_name = st.selectbox("Select an Itinerary", itinerary_names, index=default_index, key="my_it")
                 selected_it = next(it for it in itineraries if it.name == selected_name)
 
                 col1, col2 = st.columns([2, 1])
@@ -496,7 +548,14 @@ else:
                     </div>
                     """, unsafe_allow_html=True)
                     st.markdown("---")
-                    display_itinerary(selected_it.content, theme)
+                    view_flag_key = f"view_itin_my_{selected_it.id}"
+                    if st.button("View Itinerary", key=f"view_btn_my_{selected_it.id}"):
+                        st.session_state[view_flag_key] = True
+                    if st.session_state.get(view_flag_key):
+                        display_itinerary(selected_it.content, theme)
+                    else:
+                        # show a compact summary to keep UI snappy
+                        st.info("Itinerary ready. Click 'View Itinerary' to load the full details.")
 
                     # Chat animations
                     chat_bg = '#2c2c2c'
@@ -529,11 +588,14 @@ else:
                     st.write(f"Number of People: {people_display}")
                     st.write(f"Preferences: {selected_it.preferences}")
 
-                    # Image gallery: destination-specific photos (from Wikimedia/Pexels fallbacks)
-                    img_urls = get_city_images(selected_it.destination, n=3)
+                    # Image gallery: destination-specific photos (load lazily to avoid blocking reruns)
                     st.markdown("**Photos:**")
-                    carousel_html = render_carousel(img_urls, captions=[selected_it.destination, f"{selected_it.destination} - view", f"{selected_it.destination} - landmarks"], uid=f"my_{selected_it.id}", height=260)
-                    components.html(carousel_html, height=280)
+                    if st.button("Show Photos", key=f"show_photos_my_{selected_it.id}"):
+                        img_urls = get_city_images(selected_it.destination, n=3)
+                        carousel_html = render_carousel(img_urls, captions=[selected_it.destination, f"{selected_it.destination} - view", f"{selected_it.destination} - landmarks"], uid=f"my_{selected_it.id}", height=260)
+                        components.html(carousel_html, height=280)
+                    else:
+                        st.info("Click 'Show Photos' to load images (faster to render without loading remote images).")
 
                     # Flight search UI (My Itineraries)
                     st.markdown("**Find best flights to this destination**")
@@ -554,51 +616,38 @@ Output format:\n1) Airline — Price — Duration — Stops — Note\n2) ...\n3)
                         st.info(flight_resp)
 
                 st.divider()
-                st.subheader("💬 Chat with Your Itinerary")
-                chat_history = get_chat_history(selected_it.id)
-                for msg in chat_history:
-                    with st.chat_message(msg['role']):
-                        st.write(msg['content'])
-
-                if prompt := st.chat_input("Ask about your itinerary..."):
-                    with st.chat_message("user"):
-                        st.write(prompt)
-                    save_chat_message(selected_it.id, "user", prompt)
-
-                    # Get updated history
+                # Only show chat when the itinerary is being viewed (to avoid heavy rendering during saves)
+                if st.session_state.get(view_flag_key):
+                    st.subheader("💬 Chat with Your Itinerary")
                     chat_history = get_chat_history(selected_it.id)
-                    history_text = "\n".join([f"{msg['role'].capitalize()}: {msg['content']}" for msg in chat_history[:-1]])  # Exclude the latest user message
+                    for msg in chat_history:
+                        with st.chat_message(msg['role']):
+                            st.write(msg['content'])
 
-                    # AI Response
-                    chat_template = PromptTemplate(
-                        input_variables=["itinerary", "history", "question"],
-                        template="""You are a helpful and accurate travel assistant. Based on the provided itinerary, answer the user's question helpfully, drawing from the itinerary details and conversation history. Provide concise, accurate responses. Format your answers clearly using bullet points, numbered lists, or sections where appropriate for better readability.
+                    if prompt := st.chat_input("Ask about your itinerary..."):
+                        with st.chat_message("user"):
+                            st.write(prompt)
+                        save_chat_message(selected_it.id, "user", prompt)
 
-Itinerary:
+                        # Get updated history
+                        chat_history = get_chat_history(selected_it.id)
+                        history_text = "\n".join([f"{msg['role'].capitalize()}: {msg['content']}" for msg in chat_history[:-1]])  # Exclude the latest user message
 
-{itinerary}
+                        # AI Response
+                        chat_template = _get_template() if False else _get_template()
+                        model = _load_model()
+                        chat_chain = chat_template | model
+                        response = chat_chain.invoke({
+                            'itinerary': selected_it.content,
+                            'history': history_text,
+                            'question': prompt
+                        }).content.strip()
 
-Conversation History:
+                        with st.chat_message("assistant"):
+                            st.write(response)
+                        save_chat_message(selected_it.id, "assistant", response)
 
-{history}
-
-User: {question}
-
-Assistant:"""
-                    )
-                    chat_chain = chat_template | model
-                    response = chat_chain.invoke({
-                        'itinerary': selected_it.content,
-                        'history': history_text,
-                        'question': prompt
-                    }).content.strip()
-
-                    with st.chat_message("assistant"):
-                        st.write(response)
-                    save_chat_message(selected_it.id, "assistant", response)
-                    # (Duplicate display block removed to avoid rendering the itinerary twice)
-
-        with tab2:
+    with tab2:
             st.subheader("🌐 Public Itineraries")
             public_itins = get_public_itineraries()
             if not public_itins:
@@ -633,11 +682,14 @@ Assistant:"""
                     st.write(f"Preferences: {selected_pub.preferences}")
                     st.write(f"Shared by: {selected_pub.user_name}")
 
-                    # Destination-specific images
-                    img_urls_pub = get_city_images(selected_pub.destination, n=3)
+                    # Destination-specific images (load lazily)
                     st.markdown("**Photos:**")
-                    carousel_html_pub = render_carousel(img_urls_pub, captions=[selected_pub.destination, f"{selected_pub.destination} - view", f"{selected_pub.destination} - landmarks"], uid=f"pub_{selected_pub.id}", height=260)
-                    components.html(carousel_html_pub, height=280)
+                    if st.button("Show Photos", key=f"show_photos_pub_{selected_pub.id}"):
+                        img_urls_pub = get_city_images(selected_pub.destination, n=3)
+                        carousel_html_pub = render_carousel(img_urls_pub, captions=[selected_pub.destination, f"{selected_pub.destination} - view", f"{selected_pub.destination} - landmarks"], uid=f"pub_{selected_pub.id}", height=260)
+                        components.html(carousel_html_pub, height=280)
+                    else:
+                        st.info("Click 'Show Photos' to load images (faster to render without loading remote images).")
 
                     # Flight search UI (Public Itineraries)
                     st.markdown("**Find best flights to this destination**")
@@ -673,12 +725,147 @@ Output format:\n1) Airline — Price — Duration — Stops — Note\n2) ...\n3)
                                 is_public=False,
                                 num_people=selected_pub.num_people
                             )
-                            save_itinerary(private_itinerary, user_id)
+                            new_id = save_itinerary(private_itinerary, user_id)
+                            # Update session cache so the new itinerary appears immediately without a full rerun
+                            try:
+                                st.session_state['my_itins_local'] = get_itineraries(user_id)
+                                st.session_state['my_itins_local_user'] = user_id
+                                st.session_state['my_selected_name'] = new_name_public
+                            except Exception:
+                                pass
                             st.success("Itinerary saved to your private collection! You can now chat with it in 'My Itineraries'.")
-                            # Refresh the app so the 'My Itineraries' tab shows the newly saved itinerary
-                            safe_rerun()
                         else:
                             st.error("Please enter a name for your copy.")
+
+    if tab_storage:
+        with tab_storage:
+            st.subheader("🔎 Storage (local CSV & Gist)")
+            st.markdown("This view shows local CSV previews and the configured Gist contents (if any). Use the buttons to sync files between local and gist.")
+            import csv as _csv
+            from database.db import fetch_gist_file, push_gist_file
+
+            def _preview_local(filename, lines=20):
+                if not os.path.isfile(filename):
+                    st.info(f"Local file `{filename}` not found.")
+                    return
+                try:
+                    with open(filename, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                    st.code('\n'.join(content.splitlines()[:lines]))
+                except Exception as e:
+                    st.error(f"Error reading {filename}: {e}")
+
+            def _preview_gist(filename):
+                content = fetch_gist_file(filename)
+                if content is None:
+                    st.info("No gist content available or GITHUB_TOKEN not configured.")
+                    return
+                st.code('\n'.join(content.splitlines()[:20]))
+
+            st.markdown("### Local files")
+            col_l1, col_l2, col_l3 = st.columns(3)
+            with col_l1:
+                st.markdown("**users.csv**")
+                _preview_local('users.csv')
+                if st.button("Push users.csv → Gist"):
+                    try:
+                        with open('users.csv','r',encoding='utf-8') as f:
+                            txt = f.read()
+                        ok = push_gist_file('users.csv', txt)
+                        st.success("Pushed users.csv to gist" if ok else "Failed to push users.csv to gist")
+                    except Exception as e:
+                        st.error(f"Failed: {e}")
+            with col_l2:
+                st.markdown("**itineraries.csv**")
+                _preview_local('itineraries.csv')
+                if st.button("Push itineraries.csv → Gist"):
+                    try:
+                        with open('itineraries.csv','r',encoding='utf-8') as f:
+                            txt = f.read()
+                        ok = push_gist_file('itineraries.csv', txt)
+                        st.success("Pushed itineraries.csv to gist" if ok else "Failed to push itineraries.csv to gist")
+                    except Exception as e:
+                        st.error(f"Failed: {e}")
+            with col_l3:
+                st.markdown("**chat_messages.csv**")
+                _preview_local('chat_messages.csv')
+                if st.button("Push chat_messages.csv → Gist"):
+                    try:
+                        with open('chat_messages.csv','r',encoding='utf-8') as f:
+                            txt = f.read()
+                        ok = push_gist_file('chat_messages.csv', txt)
+                        st.success("Pushed chat_messages.csv to gist" if ok else "Failed to push chat_messages.csv to gist")
+                    except Exception as e:
+                        st.error(f"Failed: {e}")
+
+            st.markdown("### Gist files")
+            col_g1, col_g2, col_g3 = st.columns(3)
+            with col_g1:
+                st.markdown("**users.csv (gist)**")
+                _preview_gist('users.csv')
+                if st.button("Pull users.csv ← Gist"):
+                    content = fetch_gist_file('users.csv')
+                    if content:
+                        try:
+                            with open('users.csv','w',encoding='utf-8') as f:
+                                f.write(content)
+                            st.success('Wrote users.csv from gist to local')
+                        except Exception as e:
+                            st.error(f'Write failed: {e}')
+                    else:
+                        st.error('No gist content available')
+            with col_g2:
+                st.markdown("**itineraries.csv (gist)**")
+                _preview_gist('itineraries.csv')
+                if st.button("Pull itineraries.csv ← Gist"):
+                    content = fetch_gist_file('itineraries.csv')
+                    if content:
+                        try:
+                            with open('itineraries.csv','w',encoding='utf-8') as f:
+                                f.write(content)
+                            st.success('Wrote itineraries.csv from gist to local')
+                        except Exception as e:
+                            st.error(f'Write failed: {e}')
+                    else:
+                        st.error('No gist content available')
+            with col_g3:
+                st.markdown("**chat_messages.csv (gist)**")
+                _preview_gist('chat_messages.csv')
+                if st.button("Pull chat_messages.csv ← Gist"):
+                    content = fetch_gist_file('chat_messages.csv')
+                    if content:
+                        try:
+                            with open('chat_messages.csv','w',encoding='utf-8') as f:
+                                f.write(content)
+                            st.success('Wrote chat_messages.csv from gist to local')
+                        except Exception as e:
+                            st.error(f'Write failed: {e}')
+                    else:
+                        st.error('No gist content available')
+
+            st.markdown("### Users & Admins")
+            try:
+                users = list_users()
+                for u in users:
+                    cols = st.columns([3,1])
+                    with cols[0]:
+                        st.write(f"{u['id']}: {u['username']}")
+                        st.write("**Admin**" if u['is_admin'] else "Regular user")
+                    with cols[1]:
+                        if u['id'] == st.session_state.get('user_id'):
+                            st.write("(you)")
+                        else:
+                            btn_key = f"toggle_admin_{u['id']}"
+                            if st.button(("Revoke Admin" if u['is_admin'] else "Make Admin"), key=btn_key):
+                                try:
+                                    set_user_admin(u['id'], not u['is_admin'])
+                                    st.success('Updated admin status')
+                                    # refresh view
+                                    st.experimental_rerun()
+                                except Exception as e:
+                                    st.error(f"Failed to update admin: {e}")
+            except Exception as e:
+                st.error(f"Failed to load users: {e}")
 
 st.caption("🚀 Powered by AI | Built with Streamlit and LangChain")
 
