@@ -27,6 +27,7 @@ def init_db():
         budget TEXT,
         preferences TEXT,
         user_name TEXT,
+        is_public BOOLEAN DEFAULT 0,
         FOREIGN KEY (user_id) REFERENCES users (id)
     )''')
     c.execute('''CREATE TABLE IF NOT EXISTS chat_messages (
@@ -39,6 +40,14 @@ def init_db():
     # Try to add user_id column if not exists (for migration)
     try:
         c.execute('ALTER TABLE itineraries ADD COLUMN user_id INTEGER')
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+    try:
+        c.execute('ALTER TABLE itineraries ADD COLUMN is_public BOOLEAN DEFAULT 0')
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+    try:
+        c.execute('ALTER TABLE itineraries ADD COLUMN num_people INTEGER')
     except sqlite3.OperationalError:
         pass  # Column already exists
     conn.commit()
@@ -82,10 +91,10 @@ def authenticate_user(username, password):
 def save_itinerary(itinerary, user_id):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute('''INSERT INTO itineraries (user_id, name, content, destination, duration, budget, preferences, user_name)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+    c.execute('''INSERT INTO itineraries (user_id, name, content, destination, duration, budget, preferences, user_name, is_public, num_people)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
               (user_id, itinerary.name, itinerary.content, itinerary.destination, itinerary.duration,
-               itinerary.budget, itinerary.preferences, itinerary.user_name))
+               itinerary.budget, itinerary.preferences, itinerary.user_name, itinerary.is_public, itinerary.num_people))
     itinerary_id = c.lastrowid
     conn.commit()
     conn.close()
@@ -99,27 +108,49 @@ def save_itinerary(itinerary, user_id):
         'duration': itinerary.duration,
         'budget': itinerary.budget,
         'preferences': itinerary.preferences,
-        'user_name': itinerary.user_name
-    }, ['id', 'user_id', 'name', 'content', 'destination', 'duration', 'budget', 'preferences', 'user_name'])
+        'user_name': itinerary.user_name,
+        'is_public': itinerary.is_public,
+        'num_people': itinerary.num_people
+    }, ['id', 'user_id', 'name', 'content', 'destination', 'duration', 'budget', 'preferences', 'user_name', 'is_public', 'num_people'])
     return itinerary_id
 
 def get_itineraries(user_id):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute('SELECT * FROM itineraries WHERE user_id IS NULL OR user_id = ?', (user_id,))
+    c.execute('SELECT * FROM itineraries WHERE user_id = ?', (user_id,))
     rows = c.fetchall()
     conn.close()
-    itineraries = []
-    for row in rows:
-        # Handle old format (no user_id column) vs new format
-        if len(row) == 9 and isinstance(row[1], str):  # old: id, name, content, dest, dur, budg, pref, uname, userid
-            it = Itinerary(id=row[0], name=row[1], content=row[2], destination=row[3],
-                           duration=row[4], budget=row[5], preferences=row[6], user_name=row[7])
-        else:  # new: id, userid, name, content, dest, dur, budg, pref, uname
-            it = Itinerary(id=row[0], name=row[2], content=row[3], destination=row[4],
-                           duration=row[5], budget=row[6], preferences=row[7], user_name=row[8])
-        itineraries.append(it)
-    return itineraries
+    return [Itinerary.from_dict({
+        'id': row[0],
+        'name': row[2],
+        'content': row[3],
+        'destination': row[4],
+        'duration': row[5],
+        'budget': row[6],
+        'preferences': row[7],
+        'user_name': row[8],
+        'is_public': row[9] if len(row) > 9 else False,
+        'num_people': row[10] if len(row) > 10 else None
+    }) for row in rows]
+
+def get_public_itineraries():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('SELECT * FROM itineraries WHERE is_public = 1')
+    rows = c.fetchall()
+    conn.close()
+    return [Itinerary.from_dict({
+        'id': row[0],
+        'name': row[2],
+        'content': row[3],
+        'destination': row[4],
+        'duration': row[5],
+        'budget': row[6],
+        'preferences': row[7],
+        'user_name': row[8],
+        'is_public': row[9] if len(row) > 9 else False,
+        'num_people': row[10] if len(row) > 10 else None
+    }) for row in rows]
 
 def save_chat_message(itinerary_id, role, content):
     conn = sqlite3.connect(DB_PATH)
