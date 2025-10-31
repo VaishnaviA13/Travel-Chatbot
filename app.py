@@ -12,6 +12,30 @@ import streamlit.components.v1 as components
 import uuid
 import html
 
+
+def safe_rerun():
+    """Attempt to rerun the Streamlit script. If the runtime doesn't expose experimental_rerun,
+    fall back to changing query params (which triggers a rerun) and stopping the script.
+    This avoids AttributeError on older/newer Streamlit builds."""
+    try:
+        # Preferred method when available
+        if hasattr(st, 'experimental_rerun'):
+            st.experimental_rerun()
+            return
+    except Exception:
+        pass
+    try:
+        # Changing query params causes a rerun in Streamlit
+        st.experimental_set_query_params(_refresh=str(uuid.uuid4()))
+    except Exception:
+        # Last resort: ask the user to manually refresh
+        st.warning("Please refresh the page to see the updated data.")
+    # Stop the current run (Streamlit will re-run due to query param change)
+    try:
+        st.stop()
+    except Exception:
+        return
+
 st.set_page_config(page_title="AI Travel Itinerary Planner", page_icon="🌍", layout="wide", initial_sidebar_state="expanded")
 
 load_dotenv()
@@ -651,6 +675,8 @@ Output format:\n1) Airline — Price — Duration — Stops — Note\n2) ...\n3)
                             )
                             save_itinerary(private_itinerary, user_id)
                             st.success("Itinerary saved to your private collection! You can now chat with it in 'My Itineraries'.")
+                            # Refresh the app so the 'My Itineraries' tab shows the newly saved itinerary
+                            safe_rerun()
                         else:
                             st.error("Please enter a name for your copy.")
 
