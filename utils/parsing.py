@@ -1,5 +1,51 @@
 import streamlit as st
 import re
+import html
+
+
+def _activity_icon(text: str) -> str:
+    t = text.lower()
+    if 'morning' in t or 'breakfast' in t or 'sunrise' in t:
+        return '☀️'
+    if 'afternoon' in t or 'lunch' in t:
+        return '🌤️'
+    if 'evening' in t or 'dinner' in t or 'night' in t:
+        return '🌙'
+    if 'restaurant' in t or 'cuisine' in t or 'food' in t or 'dining' in t:
+        return '🍽️'
+    if 'hotel' in t or 'accommodation' in t or 'stay' in t:
+        return '🏨'
+    if 'train' in t or 'bus' in t or 'taxi' in t or 'transport' in t:
+        return '🚗'
+    if 'flight' in t or 'airport' in t or 'airline' in t:
+        return '✈️'
+    if 'museum' in t or 'gallery' in t:
+        return '🖼️'
+    if 'shopping' in t or 'market' in t or 'bazaar' in t:
+        return '🛍️'
+    # default icon
+    return '📌'
+
+
+def _extract_price(text: str) -> str:
+    # Look for rupee symbol or INR or 'rupees'
+    m = re.search(r'(₹\s?[0-9,]+|INR\s?[0-9,]+|[0-9,]+\s?(rupees|Rs\.?))', text, re.IGNORECASE)
+    return m.group(0) if m else ''
+
+
+def _clean_markdown(text: str) -> str:
+    """Remove common Markdown formatting and convert links to plain text."""
+    if not text:
+        return text
+    # Convert links [text](url) -> text
+    text = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", text)
+    # Remove bold/italic/backticks markers
+    text = re.sub(r"(\*\*|__|\*|`)", "", text)
+    # Remove heading markers (###, ##, #)
+    text = re.sub(r"^\s*#+\s*", "", text)
+    # Remove common list markers at line start
+    text = re.sub(r"^\s*[-\*\+]\s*", "", text)
+    return text.strip()
 
 def display_itinerary(content, theme='Dark'):
     # Define colors for dark theme
@@ -89,6 +135,9 @@ def display_itinerary(content, theme='Dark'):
         font-size: 1.2em;
         margin-right: 8px;
     }}
+    .act-icon {{ margin-right: 8px; font-size: 1.1em; }}
+    .price-badge {{ background: #bb86fc; color: #121212; padding: 4px 8px; border-radius: 12px; font-weight: 700; margin-left: 8px; font-size: 0.9em; }}
+    .act-text {{ vertical-align: middle; }}
     .day-card h3, .tips-card h4 {{
         margin: 0 0 16px 0;
         font-weight: 700;
@@ -126,13 +175,26 @@ def display_itinerary(content, theme='Dark'):
             if day_title_match:
                 title = day_title_match.group(1)
                 activities = day.replace(title, '').strip()
-                activity_lines = [line.strip().lstrip('- ').strip() for line in activities.split('\n') if line.strip()]
+                raw_lines = [line for line in activities.split('\n') if line.strip()]
+                activity_lines = [_clean_markdown(line).strip() for line in raw_lines if _clean_markdown(line).strip()]
                 if activity_lines:
+                    items_html = []
+                    for line in activity_lines:
+                        icon = _activity_icon(line)
+                        price = _extract_price(line)
+                        display_text = line
+                        if price:
+                            # remove the price snippet from the display text
+                            display_text = re.sub(re.escape(price), '', display_text, flags=re.IGNORECASE).strip(' -:')
+                        display_text = html.escape(display_text)
+                        price_html = f"<span class=\"price-badge\">{html.escape(price)}</span>" if price else ''
+                        items_html.append(f"<li><span class=\"act-icon\">{icon}</span><span class=\"act-text\">{display_text}</span>{price_html}</li>")
+
                     st.markdown(f"""
                     <div class="day-card">
                         <h3 style="margin: 0; font-weight: bold;">📅 {title}</h3>
                         <ul class="modern-list">
-                            {"".join(f"<li>{line}</li>" for line in activity_lines)}
+                            {''.join(items_html)}
                         </ul>
                     </div>
                     """, unsafe_allow_html=True)
@@ -140,7 +202,8 @@ def display_itinerary(content, theme='Dark'):
     # Display tips
     if tips:
         tips_content = tips.replace('Tips:', '').strip()
-        tip_lines = [line.strip().lstrip('- ').strip() for line in tips_content.split('\n') if line.strip()]
+        raw_tips = [line for line in tips_content.split('\n') if line.strip()]
+        tip_lines = [_clean_markdown(line) for line in raw_tips if _clean_markdown(line)]
         if tip_lines:
             st.markdown(f"""
             <div class="tips-card">
