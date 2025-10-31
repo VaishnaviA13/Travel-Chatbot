@@ -302,10 +302,7 @@ else:
     .stApp {{
         background-color: {bg_color} !important;
     }}
-    .stSidebar {{
-        background-color: {sidebar_bg} !important;
-        border-right: 2px solid #333 !important;
-    }}
+    /* Sidebar removed - using a top-row logout button instead */
     .stTextInput input, .stTextArea textarea, .stSelectbox select {{
         background-color: {input_bg} !important;
         color: {text_color} !important;
@@ -339,12 +336,15 @@ else:
     }}
     </style>
     """, unsafe_allow_html=True)
-    # Sidebar for logout
-    st.sidebar.title(f"Welcome, {st.session_state['username']}!")
-    if st.sidebar.button("Logout"):
-        del st.session_state['user_id']
-        del st.session_state['username']
-        st.rerun()
+    # Top-row welcome + logout (replace previous sidebar logout)
+    col_welcome, col_logout = st.columns([9, 1])
+    with col_welcome:
+        st.markdown(f"**Welcome, {st.session_state['username']}**")
+    with col_logout:
+        if st.button("Logout", key="logout_main"):
+            st.session_state.pop('user_id', None)
+            st.session_state.pop('username', None)
+            st.rerun()
 
     user_id = st.session_state['user_id']
 
